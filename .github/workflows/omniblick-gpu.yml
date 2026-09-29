@@ -78,7 +78,10 @@ jobs:
           ./vcpkg/vcpkg.exe integrate install
           mkdir -Force build
           cd build
-          $env:CUDAFLAGS = "-allow-unsupported-compiler"
+          # CUDA 13 CCCL refuses MSVC traditional preprocessor (ceres[cuda] kernels);
+          # vcpkg only forwards env vars named in VCPKG_KEEP_ENV_VARS.
+          $env:CUDAFLAGS = "-allow-unsupported-compiler -Xcompiler=/Zc:preprocessor"
+          $env:VCPKG_KEEP_ENV_VARS = "CUDAFLAGS"
           cmake .. `
             -GNinja `
             -DCOLMAP_HASH_MAP_BACKEND=BOOST `
