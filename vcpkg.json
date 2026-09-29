@@ -61,7 +61,13 @@
             "description": "Build with CUDA support.",
             "dependencies": [
                 "glew",
-                "cuda"
+                "cuda",
+                {
+                    "name": "ceres",
+                    "features": [
+                        "cuda"
+                    ]
+                }
             ]
         },
         "onnx": {

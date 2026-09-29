@@ -1,0 +1,154 @@
+name: OmniBlick GPU build (Windows, CUDA + Caspar + CUDA Ceres)
+
+# COLMAP's official windows-cuda release builds Ceres WITHOUT CUDA and COLMAP
+# WITHOUT Caspar, so bundle adjustment and global positioning always run on the
+# CPU. This workflow builds the same tag with -DCASPAR_ENABLED=ON and
+# ceres[cuda], and publishes the zip as a release asset that OmniBlick pins.
+# GUI is off (OmniBlick only drives the CLI) to keep the build inside the
+# 6-hour hosted-runner limit.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag to publish (e.g. 4.2.1-gpu1). Empty = artifact only.
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 350
+    env:
+      CUDA_MAJOR_VERSION: 13
+      CUDA_MINOR_VERSION: 2
+      CUDA_PATCH_VERSION: 0
+      VCPKG_BINARY_CACHE: ${{ github.workspace }}/vcpkg-bincache
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore vcpkg binary cache
+        id: vcache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.VCPKG_BINARY_CACHE }}
+          key: vcpkg-gpu-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}
+          restore-keys: |
+            vcpkg-gpu-${{ hashFiles('vcpkg.json') }}-
+            vcpkg-gpu-
+
+      - name: Setup vcpkg binary sources
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "${{ env.VCPKG_BINARY_CACHE }}" | Out-Null
+          echo "VCPKG_BINARY_SOURCES=clear;files,${{ env.VCPKG_BINARY_CACHE }},readwrite" >> "${env:GITHUB_ENV}"
+
+      - name: Install CUDA
+        uses: Jimver/cuda-toolkit@v0.2.35
+        id: cuda-toolkit
+        with:
+          cuda: '${{ env.CUDA_MAJOR_VERSION }}.${{ env.CUDA_MINOR_VERSION }}.${{ env.CUDA_PATCH_VERSION }}'
+          sub-packages: '["nvcc", "crt", "nvvm", "nvptxcompiler", "thrust", "nvtx", "cudart", "curand", "curand_dev", "nvrtc_dev", "cublas", "cublas_dev", "cusolver", "cusolver_dev", "cusparse", "cusparse_dev", "nvjitlink"]'
+          method: 'network'
+
+      - name: Setup vcpkg
+        shell: pwsh
+        run: |
+          ./scripts/shell/enter_vs_dev_shell.ps1
+          cd ${{ github.workspace }}
+          git clone https://github.com/microsoft/vcpkg
+          cd vcpkg
+          ./bootstrap-vcpkg.bat
+
+      - name: Install CMake and Ninja
+        uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: "4.3.2"
+          ninjaVersion: "1.12.1"
+
+      - name: Configure and build
+        shell: pwsh
+        run: |
+          ./scripts/shell/enter_vs_dev_shell.ps1
+          cd ${{ github.workspace }}
+          ./vcpkg/vcpkg.exe integrate install
+          mkdir -Force build
+          cd build
+          $env:CUDAFLAGS = "-allow-unsupported-compiler"
+          cmake .. `
+            -GNinja `
+            -DCOLMAP_HASH_MAP_BACKEND=BOOST `
+            -DCMAKE_MAKE_PROGRAM=ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DTESTS_ENABLED=OFF `
+            -DGUI_ENABLED=OFF `
+            -DCUDA_ENABLED=ON `
+            -DCASPAR_ENABLED=ON `
+            -DCMAKE_CUDA_ARCHITECTURES=all-major `
+            -DCUDAToolkit_ROOT="${{ steps.cuda-toolkit.outputs.CUDA_PATH }}" `
+            -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-release `
+            -DVCPKG_MANIFEST_NO_DEFAULT_FEATURES=ON `
+            "-DVCPKG_MANIFEST_FEATURES=download;cuda;cgal" `
+            -DVCPKG_USE_LEGACY_APPLOCAL=ON `
+            -DCMAKE_INSTALL_PREFIX=install
+          if ($LASTEXITCODE -ne 0) { throw "configure failed" }
+          ninja
+          if ($LASTEXITCODE -ne 0) { throw "build failed" }
+
+      - name: Save vcpkg binary cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.VCPKG_BINARY_CACHE }}
+          key: vcpkg-gpu-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}
+
+      - name: Export package
+        shell: pwsh
+        run: |
+          ./vcpkg/vcpkg.exe integrate install
+          cd build
+          ninja install
+          ../vcpkg/vcpkg.exe install `
+              --triplet=x64-windows-release `
+              --x-no-default-features `
+              --x-feature=download `
+              --x-feature=cgal `
+              --x-feature=cuda
+          ../vcpkg/vcpkg.exe export --raw --output-dir vcpkg_export --output colmap
+          if (Test-Path vcpkg_export/colmap/installed/x64-windows/bin) { cp vcpkg_export/colmap/installed/x64-windows/bin/*.dll install/bin }
+          cp vcpkg_export/colmap/installed/x64-windows-release/bin/*.dll install/bin
+          $cuda = "${{ steps.cuda-toolkit.outputs.CUDA_PATH }}"
+          foreach ($pat in @("cudart64_*.dll","curand64_*.dll","cublas64_*.dll","cublasLt64_*.dll","cusolver64_*.dll","cusparse64_*.dll","nvJitLink_*.dll")) {
+              Get-ChildItem "$cuda/bin" -Recurse -Filter $pat | ForEach-Object { cp $_.FullName install/bin }
+          }
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue install/include,install/lib,install/share
+          # Prove the two things this build exists for, on the runner (no GPU:
+          # the strings must be present, the runtime probe happens on user machines).
+          $exe = "install/bin/colmap.exe"
+          & $exe -h | Select-Object -First 1
+          $bytes = [IO.File]::ReadAllText((Resolve-Path $exe))
+          if ($bytes.Contains("built without CASPAR_ENABLED")) { throw "Caspar is NOT compiled in" }
+          Get-ChildItem install/bin | Select-Object Name, Length | Format-Table | Out-String -Width 200
+          Compress-Archive -Path install/* -DestinationPath ../colmap-x64-windows-cuda-caspar.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: colmap-x64-windows-cuda-caspar
+          path: colmap-x64-windows-cuda-caspar.zip
+
+      - name: Publish release
+        if: ${{ github.event.inputs.release_tag != '' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.event.inputs.release_tag }}" colmap-x64-windows-cuda-caspar.zip `
+            --repo "${{ github.repository }}" `
+            --title "COLMAP ${{ github.event.inputs.release_tag }} (Windows CUDA + Caspar GPU bundle adjustment)" `
+            --notes "COLMAP built from the upstream tag with -DCASPAR_ENABLED=ON and ceres[cuda] for OmniBlick. BSD-3 (COLMAP), Apache-2.0 (Ceres). CUDA runtime DLLs redistributed under the NVIDIA CUDA EULA."
