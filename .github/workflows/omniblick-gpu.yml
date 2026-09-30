@@ -95,6 +95,7 @@ jobs:
             -DCUDAToolkit_ROOT="${{ steps.cuda-toolkit.outputs.CUDA_PATH }}" `
             -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET=x64-windows-release `
+            -DVCPKG_OVERLAY_TRIPLETS="${{ github.workspace }}/triplets" `
             -DVCPKG_MANIFEST_NO_DEFAULT_FEATURES=ON `
             "-DVCPKG_MANIFEST_FEATURES=download;cuda;cgal" `
             -DVCPKG_USE_LEGACY_APPLOCAL=ON `
@@ -118,6 +119,7 @@ jobs:
           ninja install
           ../vcpkg/vcpkg.exe install `
               --triplet=x64-windows-release `
+              --overlay-triplets=../triplets `
               --x-no-default-features `
               --x-feature=download `
               --x-feature=cgal `
